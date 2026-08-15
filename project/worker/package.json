@@ -1,0 +1,13 @@
+{
+  "name": "film-central-worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claims render jobs from Supabase and compiles finished videos with FFmpeg.",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4"
+  }
+}
