@@ -22,5 +22,26 @@ dist-ssr
 *.sw?
 .env
 
+# `.env` on its own does not match `.env.txt` — which is exactly what Notepad saves
+# when you don't pick "All Files" in the dialog. Copies made that way have held real
+# keys, so match every variant and re-admit only the placeholder example.
+.env.*
+*.env
+*.env.*
+!.env.example
+
+# Loose credential files. A GitHub token was once saved in this repo as a plain file
+# named after the token itself; a public repo is an unforgiving place to discover that.
+# Keep credentials in a password manager or Windows Credential Manager, not on disk.
+*github_pat*
+ghp_*
+gho_*
+sb_secret_*
+sk-*
+*.pem
+*.key
+*.token
+*.credentials
+
 # Full-quality renders written by the worker. Large binaries, never source.
 masters
