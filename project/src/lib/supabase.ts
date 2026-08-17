@@ -197,6 +197,27 @@ export async function generateVoiceover(params: {
   }
 }
 
+/**
+ * Turns a Storage URL into one that actually downloads.
+ *
+ * An `<a download>` attribute is ignored for cross-origin URLs, and the app and Storage are
+ * always different origins — so the browser navigates to the file and plays it inline
+ * instead. Supabase's `?download=` parameter sets `Content-Disposition: attachment`, which
+ * works regardless of origin and names the saved file.
+ *
+ * The extension is taken from the URL rather than assumed, so a name can't claim `.webm`
+ * for what is now an `.mp4`.
+ */
+export function downloadUrl(url: string, baseName: string): string {
+  if (!url) return url;
+  const withoutQuery = url.split('?')[0];
+  const ext = withoutQuery.includes('.') ? withoutQuery.split('.').pop()! : '';
+  const safeBase = baseName.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, '-') || 'download';
+  const filename = ext ? `${safeBase}.${ext}` : safeBase;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}download=${encodeURIComponent(filename)}`;
+}
+
 export type RenderJobStatus = 'queued' | 'rendering' | 'done' | 'error';
 
 export interface RenderJob {

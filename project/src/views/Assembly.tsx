@@ -1,6 +1,5 @@
-import { supabase, enqueueRender, getRenderJob, type Video, type BrollAsset, type AssetType, type RenderJob, type ScriptProject, ASSET_TYPE_LABELS, ASSET_STATUS_COLORS } from '@/lib/supabase';
-import { compileVideo, type CompileProgress } from '@/lib/videoCompiler';
-import { Play, Pause, Download, Volume2, Film as FilmIcon, Image, Music, Monitor, ExternalLink, Check, Clock, AlertCircle, Clapperboard, Wand2, Loader2, Video as VideoIcon, Maximize2, RotateCcw, Server, FileVideo } from 'lucide-react';
+import { downloadUrl, supabase, enqueueRender, getRenderJob, type Video, type BrollAsset, type AssetType, type RenderJob, type ScriptProject, ASSET_TYPE_LABELS, ASSET_STATUS_COLORS } from '@/lib/supabase';
+import { Play, Pause, Download, Volume2, Film as FilmIcon, Image, Music, Monitor, ExternalLink, Check, Clock, AlertCircle, Clapperboard, Wand2, Loader2, Video as VideoIcon, Maximize2, RotateCcw, FileVideo } from 'lucide-react';
 import { useEffect, useState, useCallback, useRef } from 'react';
 
 const ASSET_TYPE_ICONS: Record<AssetType, typeof FilmIcon> = {
@@ -22,7 +21,6 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [compileProgress, setCompileProgress] = useState<CompileProgress | null>(null);
   const [queueing, setQueueing] = useState(false);
   const [queueJob, setQueueJob] = useState<RenderJob | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -79,43 +77,6 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
   };
 
   const assemblyReady = hasVoiceover && readyAssets.length > 0;
-
-  // A finished run leaves compileProgress on 'done', so treat that as idle too —
-  // otherwise the button never comes back and a bad cut can't be re-rendered.
-  const compileIdle = !compileProgress || compileProgress.phase === 'done';
-
-  const handleCompile = async () => {
-    if (!selected || !hasVoiceover || !latestProject) return;
-    setCompileProgress({ phase: 'preparing', message: 'Starting…', percent: 0 });
-
-    const { result, error } = await compileVideo(
-      selected.voiceover_url!,
-      readyAssets,
-      selected.id,
-      latestProject.id,
-      setCompileProgress,
-    );
-
-    if (error) {
-      setCompileProgress({ phase: 'error', message: error, percent: 0 });
-      return;
-    }
-
-    if (result) {
-      // Save compiled video URL to the project
-      await supabase
-        .from('script_projects')
-        .update({ compiled_video_url: result.url })
-        .eq('id', latestProject.id);
-      await load();
-      onRefresh();
-      // Scroll to top so the finished video panel is visible
-      setTimeout(() => {
-        const panel = document.getElementById('finished-video-panel');
-        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
-    }
-  };
 
   /**
    * Hands the render to the worker instead of doing it here. Polling stops as soon as the
@@ -241,37 +202,32 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                       hint={readyAssets.length > 0 ? `${readyAssets.length} asset${readyAssets.length === 1 ? '' : 's'} ready` : 'Mark assets as "ready" in B-Roll tab'}
                     />
                   </div>
-                  {assemblyReady && compileIdle && (
+                  {assemblyReady && (
                     <div className="mt-4 space-y-3">
                       {!hasCompiledVideo && (
                         <div className="p-3 rounded-lg bg-success-500/10 border border-success-500/30 flex items-center gap-2">
                           <Check className="w-4 h-4 text-success-400" />
-                          <p className="text-xs text-success-400 font-medium">All components ready — auto-edit your video now!</p>
+                          <p className="text-xs text-success-400 font-medium">All components ready — render your video now.</p>
                         </div>
                       )}
                       <button
-                        onClick={handleCompile}
-                        className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
+                        onClick={handleQueue}
+                        disabled={queueing}
+                        className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
                           hasCompiledVideo
                             ? 'bg-ink-800 hover:bg-ink-700 text-slate-300 border border-ink-700'
                             : 'bg-brand-600 hover:bg-brand-500 text-white shadow-md shadow-brand-600/20'
                         }`}
                       >
-                        {hasCompiledVideo ? <RotateCcw className="w-4 h-4" /> : <Wand2 className="w-4 h-4" />}
-                        {hasCompiledVideo ? 'Re-compile Video' : 'Auto-Edit Video'}
-                      </button>
-                      <button
-                        onClick={handleQueue}
-                        disabled={queueing}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-ink-800 hover:bg-ink-700 text-slate-300 text-sm font-medium border border-ink-700 transition-colors disabled:opacity-50"
-                      >
-                        {queueing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Server className="w-4 h-4" />}
-                        {queueing ? 'Queued…' : 'Render on worker'}
+                        {queueing
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : hasCompiledVideo ? <RotateCcw className="w-4 h-4" /> : <Wand2 className="w-4 h-4" />}
+                        {queueing ? 'Rendering…' : hasCompiledVideo ? 'Re-render Video' : 'Render Video'}
                       </button>
 
                       <p className="text-xs text-ink-500 leading-relaxed">
-                        Rendering in the browser needs this tab open for the video's full length. The worker renders
-                        faster than real time and doesn't need the page at all — it just has to be running.
+                        Rendering runs on the worker, faster than real time. You can close this page once it starts —
+                        the finished video will be waiting in Projects.
                       </p>
 
                       {queueJob && (
@@ -292,32 +248,15 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                   )}
                 </div>
 
-                {/* Compile progress */}
-                {compileProgress && compileProgress.phase !== 'done' && compileProgress.phase !== 'error' && (
-                  <div className="bg-ink-850 border border-ink-700 rounded-xl p-5">
-                    <div className="flex items-center gap-3 mb-3">
-                      <Loader2 className="w-5 h-5 text-brand-400 animate-spin" />
-                      <p className="text-sm text-white font-medium">{compileProgress.message}</p>
-                    </div>
-                    <div className="h-2 rounded-full bg-ink-700 overflow-hidden">
-                      <div
-                        className="h-full bg-brand-500 rounded-full transition-all duration-300"
-                        style={{ width: `${compileProgress.percent}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-ink-500 mt-2">{compileProgress.percent}%</p>
-                  </div>
-                )}
-
-                {/* Compile error */}
-                {compileProgress && compileProgress.phase === 'error' && (
+                {/* Render failure, reported by the worker */}
+                {queueJob?.status === 'error' && (
                   <div className="bg-error-500/10 border border-error-500/30 rounded-xl p-4 flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 text-error-400 shrink-0 mt-0.5" />
                     <div>
-                      <p className="text-sm text-error-400 font-medium">Compilation failed</p>
-                      <p className="text-xs text-error-400/80 mt-1">{compileProgress.message}</p>
+                      <p className="text-sm text-error-400 font-medium">Render failed</p>
+                      <p className="text-xs text-error-400/80 mt-1">{queueJob.error}</p>
                       <button
-                        onClick={() => setCompileProgress(null)}
+                        onClick={() => setQueueJob(null)}
                         className="mt-2 text-xs text-brand-400 hover:text-brand-300 font-medium"
                       >
                         Dismiss
@@ -393,8 +332,7 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                       {/* Export buttons */}
                       <div className="flex flex-col sm:flex-row gap-3">
                         <a
-                          href={latestProject.compiled_video_url}
-                          download={`compiled-${selected.title.replace(/\s+/g, '-')}.webm`}
+                          href={downloadUrl(latestProject.compiled_video_url, `compiled-${selected.title}`)}
                           className="flex-1 flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold transition-all shadow-lg shadow-brand-600/20 hover:shadow-brand-600/30"
                         >
                           <Download className="w-4 h-4" />
@@ -411,11 +349,13 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                         </a>
                       </div>
 
-                      {/* Success badge after compile */}
-                      {compileProgress?.phase === 'done' && (
-                        <div className="p-3 rounded-lg bg-success-500/10 border border-success-500/30 flex items-center gap-2">
-                          <Check className="w-4 h-4 text-success-400" />
-                          <p className="text-xs text-success-400 font-medium">Video compiled and saved to project! Export it anytime.</p>
+                      {latestProject?.compiled_is_preview && (
+                        <div className="p-3 rounded-lg bg-warning-500/10 border border-warning-500/30 flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-warning-400 shrink-0 mt-0.5" />
+                          <p className="text-xs text-warning-400 leading-relaxed">
+                            This is a 480p preview — the full-quality master was too large for your storage plan. It's
+                            in your masters folder, and on YouTube if you published it.
+                          </p>
                         </div>
                       )}
                     </div>
@@ -451,8 +391,7 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                         className="hidden"
                       />
                       <a
-                        href={selected.voiceover_url}
-                        download={`voiceover-${selected.title.replace(/\s+/g, '-')}.mp3`}
+                        href={downloadUrl(selected.voiceover_url, `voiceover-${selected.title}`)}
                         className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-ink-700 transition-colors shrink-0"
                       >
                         <Download className="w-4 h-4" />

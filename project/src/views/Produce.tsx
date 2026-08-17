@@ -1,4 +1,5 @@
 import {
+  downloadUrl,
   listVoices,
   uploadToYouTube,
   supabase,
@@ -518,8 +519,7 @@ function ResultPanel({ project, onChange }: { project: ScriptProject; onChange: 
           <div className="flex flex-col sm:flex-row gap-3">
             {project.compiled_video_url && (
               <a
-                href={project.compiled_video_url}
-                download
+                href={downloadUrl(project.compiled_video_url, project.youtube_title || 'video')}
                 className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-ink-800 hover:bg-ink-700 text-slate-300 text-sm font-medium border border-ink-700 transition-colors"
               >
                 <Download className="w-4 h-4" />
@@ -528,8 +528,7 @@ function ResultPanel({ project, onChange }: { project: ScriptProject; onChange: 
             )}
             {project.thumbnail_url && (
               <a
-                href={project.thumbnail_url}
-                download
+                href={downloadUrl(project.thumbnail_url, `${project.youtube_title || 'video'}-thumbnail`)}
                 className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-ink-800 hover:bg-ink-700 text-slate-300 text-sm font-medium border border-ink-700 transition-colors"
               >
                 <ExternalLink className="w-4 h-4" />

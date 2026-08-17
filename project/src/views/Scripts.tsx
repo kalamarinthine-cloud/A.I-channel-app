@@ -1,4 +1,4 @@
-import { supabase, type Video, type Runtime, type ElevenVoice, type ScriptProject, generateScript, generateVoiceover, listVoices } from '@/lib/supabase';
+import { downloadUrl, supabase, type Video, type Runtime, type ElevenVoice, type ScriptProject, generateScript, generateVoiceover, listVoices } from '@/lib/supabase';
 import { StatusBadge } from '@/components/StatusBadge';
 import Modal from '@/components/Modal';
 import { FileText, Save, Check, Clock, Hash, Sparkles, Volume2, Loader2, Play, Pause, Download, AlertCircle } from 'lucide-react';
@@ -299,8 +299,7 @@ export default function Scripts({ onRefresh }: ScriptsProps) {
                       className="hidden"
                     />
                     <a
-                      href={audioUrl}
-                      download={`voiceover-${selected.title.replace(/\s+/g, '-')}.mp3`}
+                      href={downloadUrl(audioUrl, `voiceover-${selected.title}`)}
                       className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-ink-700 transition-colors"
                     >
                       <Download className="w-4 h-4" />

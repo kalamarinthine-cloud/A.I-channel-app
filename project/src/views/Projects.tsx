@@ -1,4 +1,4 @@
-import { supabase, type Video, type ScriptProject } from '@/lib/supabase';
+import { downloadUrl, supabase, type Video, type ScriptProject } from '@/lib/supabase';
 import { FileText, Volume2, Play, Pause, Download, Clock, ChevronDown, ChevronRight, Film, Video as VideoIcon } from 'lucide-react';
 import { useEffect, useState, useCallback, useRef } from 'react';
 
@@ -173,8 +173,7 @@ export default function Projects({ onRefresh }: ProjectsProps) {
                                 <p className="text-xs text-ink-500 mt-0.5">{project.voiceover_voice || 'Unknown voice'}</p>
                               </div>
                               <a
-                                href={project.voiceover_url}
-                                download={`voiceover-${project.id}.mp3`}
+                                href={downloadUrl(project.voiceover_url, `voiceover-${project.id}`)}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-ink-700 transition-colors shrink-0"
                               >
                                 <Download className="w-3.5 h-3.5" />
@@ -196,8 +195,7 @@ export default function Projects({ onRefresh }: ProjectsProps) {
                                   Compiled Video
                                 </p>
                                 <a
-                                  href={project.compiled_video_url}
-                                  download={`compiled-${project.id}.webm`}
+                                  href={downloadUrl(project.compiled_video_url, `compiled-${project.id}`)}
                                   className="flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 font-medium"
                                 >
                                   <Download className="w-3 h-3" />
