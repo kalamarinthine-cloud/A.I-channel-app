@@ -3,7 +3,6 @@ import {
   enqueueRender,
   generateScript,
   generateMetadata,
-  generateVoiceover,
   getRenderJob,
   listVoices,
   planBroll,
@@ -15,6 +14,7 @@ import {
 
 const STAGE_LABELS: Record<string, string> = {
   claimed: 'Worker picked up the job…',
+  voiceover: 'Narrating the script…',
   downloading: 'Downloading voiceover and clips…',
   rendering: 'Rendering with FFmpeg…',
   thumbnail: 'Composing the thumbnail…',
@@ -107,15 +107,15 @@ function initialState(): PipelineState {
 }
 
 /**
- * Runs the whole faceless-video pipeline end to end: script, metadata, voiceover,
- * auto-sourced B-roll, the compiled cut, and a thumbnail.
+ * Runs the whole faceless-video pipeline end to end: script, metadata, voice selection,
+ * auto-sourced B-roll, then a queued render that narrates, cuts and optionally publishes.
  *
  * Every step writes its result to the database as soon as it succeeds, so a run that
  * fails halfway leaves a real project behind that can be finished by hand in the
  * Scripts / B-Roll / Assembly tabs rather than being lost.
  *
- * Note: compiling runs in real time (the recorder captures the canvas at playback
- * speed), so a ten-minute video takes about ten minutes at that step.
+ * Nothing here holds the browser open past the hand-off: once the job is queued, the page
+ * can be closed and the finished video will be waiting in Projects.
  */
 export async function produceVideo(
   options: ProduceOptions,
@@ -235,7 +235,10 @@ export async function produceVideo(
 
   setStep('metadata', { status: 'done', detail: `"${metadata.title}" · ${metadata.tags.length} tags` });
 
-  // --------------------------------------------------------------- 4. Voiceover
+  // ---------------------------------------------------------------- 4. Voice
+  // Only the voice is chosen here. Narration itself happens on the worker: a long script
+  // needs several sequential ElevenLabs calls, and an edge function gets killed part way
+  // through for exceeding its wall-clock budget.
   setStep('voiceover', { status: 'running', detail: 'Selecting a voice…' });
 
   let voiceId = options.voiceId;
@@ -247,29 +250,12 @@ export async function produceVideo(
     voiceId = voices[0].voiceId;
   }
 
-  setStep('voiceover', { status: 'running', detail: 'ElevenLabs is narrating the script…' });
-
-  const { url: voiceoverUrl, error: voiceoverError } = await generateVoiceover({
-    text: script,
-    voiceId,
-    videoId: video.id,
-  });
-
-  if (voiceoverError || !voiceoverUrl) {
-    return fail('voiceover', voiceoverError ?? 'No voiceover was returned.');
-  }
-
-  await supabase
-    .from('videos')
-    .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId, updated_at: new Date().toISOString() })
-    .eq('id', video.id);
-
   await supabase
     .from('script_projects')
-    .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId, pipeline_step: 'voiceover' })
+    .update({ voiceover_voice: voiceId, pipeline_step: 'voiceover' })
     .eq('id', project.id);
 
-  setStep('voiceover', { status: 'done', detail: 'Narration ready' });
+  setStep('voiceover', { status: 'done', detail: 'Voice selected — the worker will narrate' });
 
   // ------------------------------------------------------------------ 5. B-roll
   setStep('broll', { status: 'running', detail: 'Planning shots and searching Pexels…' });
@@ -333,6 +319,7 @@ export async function produceVideo(
     projectId: project.id,
     publishToYouTube: options.publishToYouTube,
     privacyStatus: options.privacyStatus,
+    voiceId,
   });
 
   if (enqueueError || !job) {

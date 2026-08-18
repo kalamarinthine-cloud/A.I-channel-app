@@ -249,6 +249,8 @@ export async function enqueueRender(params: {
   /** Opt-in. Publishing is outward-facing and each upload costs 1,600 daily quota units. */
   publishToYouTube?: boolean;
   privacyStatus?: 'private' | 'unlisted' | 'public';
+  /** Only used when the project has no voiceover yet; the worker narrates it. */
+  voiceId?: string;
 }): Promise<{ job?: RenderJob; error?: string }> {
   const { data, error } = await supabase
     .from('render_jobs')
@@ -257,6 +259,7 @@ export async function enqueueRender(params: {
       project_id: params.projectId,
       publish_to_youtube: params.publishToYouTube ?? false,
       privacy_status: params.privacyStatus ?? 'private',
+      voice_id: params.voiceId ?? '',
     })
     .select()
     .single();

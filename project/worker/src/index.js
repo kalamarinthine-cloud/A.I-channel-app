@@ -5,6 +5,7 @@ import path from 'node:path';
 import { checkFont, probeDuration, renderVideo, renderPreview, renderThumbnail } from './ffmpeg.js';
 import { hasCredentials, uploadVideo, setThumbnail } from './youtube.js';
 import { pruneMasters } from './retention.js';
+import { synthesise } from './tts.js';
 
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
@@ -147,8 +148,42 @@ async function processJob(job) {
 
     if (!project) throw new Error('Project row not found');
 
-    const voiceoverUrl = project.voiceover_url;
-    if (!voiceoverUrl) throw new Error('Project has no voiceover');
+    // --- voiceover ----------------------------------------------------------
+    // Generated here rather than in an edge function: a long script needs several
+    // sequential ElevenLabs calls, and edge functions are killed part way through for
+    // exceeding their wall-clock budget. Skipped when the project already has audio.
+    let voiceoverUrl = project.voiceover_url;
+
+    if (!voiceoverUrl) {
+      await setStage(job.id, 'voiceover');
+      const voiceId = project.voiceover_voice || job.voice_id;
+      if (!voiceId) throw new Error('No voice selected for this project');
+
+      const mp3 = await synthesise({
+        script: project.script_content,
+        voiceId,
+        onProgress: (msg) => log(`tts: ${msg}`),
+      });
+
+      const key = `${job.video_id}/${Date.now()}.mp3`;
+      const { error: uploadError } = await supabase.storage
+        .from('voiceovers')
+        .upload(key, mp3, { contentType: 'audio/mpeg', upsert: false });
+      if (uploadError) throw new Error(`Voiceover upload failed: ${uploadError.message}`);
+
+      voiceoverUrl = supabase.storage.from('voiceovers').getPublicUrl(key).data.publicUrl;
+
+      await supabase
+        .from('script_projects')
+        .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId })
+        .eq('id', job.project_id);
+      await supabase
+        .from('videos')
+        .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId, updated_at: new Date().toISOString() })
+        .eq('id', job.video_id);
+
+      log(`voiceover saved (${(mp3.length / 1024 / 1024).toFixed(1)} MB)`);
+    }
 
     const clips = (assets || []).filter((a) => a.source_url && a.type !== 'music' && a.type !== 'sfx');
     if (clips.length === 0) throw new Error('No ready visual B-roll for this video');
