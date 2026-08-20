@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { callAnthropic } from "../_shared/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -137,47 +138,25 @@ Cut the script into exactly ${beatTarget} sequential visual beats, in narration 
 Script:
 ${String(script).slice(0, 20000)}`;
 
-    const planResponse = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "server-side-fallback-2026-07-01",
+    const { text: raw, error: planError, refused } = await callAnthropic({
+      apiKey: anthropicKey,
+      system: systemPrompt,
+      prompt: userPrompt,
+      outputConfig: {
+        effort: "medium",
+        format: { type: "json_schema", schema: PLAN_SCHEMA },
       },
-      body: JSON.stringify({
-        model: "claude-opus-5",
-        max_tokens: 8000,
-        system: systemPrompt,
-        output_config: {
-          effort: "medium",
-          format: { type: "json_schema", schema: PLAN_SCHEMA },
-        },
-        fallbacks: "default",
-        messages: [{ role: "user", content: userPrompt }],
-      }),
     });
 
-    if (!planResponse.ok) {
-      const errText = await planResponse.text();
-      return new Response(JSON.stringify({ error: `Anthropic request failed: ${planResponse.status} — ${errText}` }), {
-        status: 502,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const planData = await planResponse.json();
-
-    if (planData.stop_reason === "refusal") {
+    if (refused) {
       return new Response(JSON.stringify({ error: "Claude declined to plan B-roll for this script." }), {
         status: 422,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const raw = planData.content?.find((b: { type: string }) => b.type === "text")?.text;
-    if (!raw) {
-      return new Response(JSON.stringify({ error: "No B-roll plan returned from Claude" }), {
+    if (planError || !raw) {
+      return new Response(JSON.stringify({ error: planError ?? "No B-roll plan returned from Claude" }), {
         status: 502,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

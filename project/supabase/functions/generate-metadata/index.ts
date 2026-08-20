@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { callAnthropic } from "../_shared/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -63,47 +64,25 @@ Niche: ${niche}
 Script:
 ${String(script).slice(0, 20000)}`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "server-side-fallback-2026-07-01",
+    const { text: raw, error: callError, refused } = await callAnthropic({
+      apiKey,
+      system: systemPrompt,
+      prompt: userPrompt,
+      outputConfig: {
+        effort: "medium",
+        format: { type: "json_schema", schema: METADATA_SCHEMA },
       },
-      body: JSON.stringify({
-        model: "claude-opus-5",
-        max_tokens: 8000,
-        system: systemPrompt,
-        output_config: {
-          effort: "medium",
-          format: { type: "json_schema", schema: METADATA_SCHEMA },
-        },
-        fallbacks: "default",
-        messages: [{ role: "user", content: userPrompt }],
-      }),
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return new Response(JSON.stringify({ error: `Anthropic request failed: ${response.status} — ${errText}` }), {
-        status: 502,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const data = await response.json();
-
-    if (data.stop_reason === "refusal") {
+    if (refused) {
       return new Response(JSON.stringify({ error: "Claude declined to generate metadata for this script." }), {
         status: 422,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const raw = data.content?.find((b: { type: string }) => b.type === "text")?.text;
-    if (!raw) {
-      return new Response(JSON.stringify({ error: "No metadata returned from Claude" }), {
+    if (callError || !raw) {
+      return new Response(JSON.stringify({ error: callError ?? "No metadata returned from Claude" }), {
         status: 502,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { callAnthropic } from "../_shared/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -58,36 +59,25 @@ ${wordTarget}
 
 Format the script with clear section headers in brackets like [INTRO], [SECTION 1: ...], [SECTION 2: ...], [OUTRO]. Write ONLY the spoken narration text — no visual cues, no stage directions, no b-roll notes, no camera instructions. Just the words the narrator will say.`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [
-          { role: "user", content: userPrompt },
-        ],
-      }),
+    const { text: script, error: callError, refused } = await callAnthropic({
+      apiKey,
+      model: "claude-sonnet-4-5",
+      // A "Long" script targets up to 3,500 words, which does not fit in 4,096 tokens —
+      // the script would simply stop mid-sentence.
+      maxTokens: 16000,
+      system: systemPrompt,
+      prompt: userPrompt,
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return new Response(JSON.stringify({ error: `Anthropic request failed: ${response.status} — ${errText}` }), {
-        status: 502,
+    if (refused) {
+      return new Response(JSON.stringify({ error: "Claude declined to write this script." }), {
+        status: 422,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const data = await response.json();
-    const script = data.content?.[0]?.text;
-
-    if (!script) {
-      return new Response(JSON.stringify({ error: "No script content returned from Claude" }), {
+    if (callError || !script) {
+      return new Response(JSON.stringify({ error: callError ?? "No script content returned from Claude" }), {
         status: 502,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
