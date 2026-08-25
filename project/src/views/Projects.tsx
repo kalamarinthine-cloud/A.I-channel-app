@@ -1,5 +1,6 @@
 import { downloadUrl, supabase, type Video, type ScriptProject } from '@/lib/supabase';
-import { FileText, Volume2, Play, Pause, Download, Clock, ChevronDown, ChevronRight, Film, Video as VideoIcon } from 'lucide-react';
+import { FileText, Volume2, Play, Pause, Download, Clock, ChevronDown, ChevronRight, Film, Search, Video as VideoIcon } from 'lucide-react';
+import SeoPanel from '@/components/SeoPanel';
 import { useEffect, useState, useCallback, useRef } from 'react';
 
 interface ProjectsProps {
@@ -158,6 +159,23 @@ export default function Projects({ onRefresh }: ProjectsProps) {
                           <div className="bg-ink-800 rounded-lg p-3 mb-3 max-h-40 overflow-y-auto">
                             <p className="text-sm text-slate-300 whitespace-pre-wrap leading-relaxed">{project.script_content || 'No script content'}</p>
                           </div>
+
+                          {/* YouTube listing, collapsed so it doesn't crowd the history */}
+                          {(project.youtube_title || project.youtube_description) && (
+                            <details className="bg-ink-800 rounded-lg mb-3 group">
+                              <summary className="flex items-center gap-2 px-3 py-2.5 cursor-pointer text-xs font-medium text-slate-300 hover:text-white">
+                                <ChevronRight className="w-3.5 h-3.5 text-ink-500 transition-transform group-open:rotate-90" />
+                                <Search className="w-3.5 h-3.5 text-brand-400" />
+                                SEO listing
+                                <span className="text-ink-500 font-normal">
+                                  · {(project.youtube_tags ?? []).length} tags
+                                </span>
+                              </summary>
+                              <div className="px-3 pb-3">
+                                <SeoPanel project={project} bare />
+                              </div>
+                            </details>
+                          )}
 
                           {/* Voiceover */}
                           {hasVoice ? (

@@ -1,5 +1,6 @@
-import { downloadUrl, supabase, enqueueRender, getRenderJob, type Video, type BrollAsset, type AssetType, type RenderJob, type ScriptProject, ASSET_TYPE_LABELS, ASSET_STATUS_COLORS } from '@/lib/supabase';
+import { downloadUrl, supabase, enqueueRender, generateMetadata, getRenderJob, type Video, type BrollAsset, type AssetType, type RenderJob, type ScriptProject, ASSET_TYPE_LABELS, ASSET_STATUS_COLORS } from '@/lib/supabase';
 import { Play, Pause, Download, Volume2, Film as FilmIcon, Image, Music, Monitor, ExternalLink, Check, Clock, AlertCircle, Clapperboard, Wand2, Loader2, Video as VideoIcon, Maximize2, RotateCcw, FileVideo } from 'lucide-react';
+import SeoPanel from '@/components/SeoPanel';
 import { useEffect, useState, useCallback, useRef } from 'react';
 
 const ASSET_TYPE_ICONS: Record<AssetType, typeof FilmIcon> = {
@@ -23,6 +24,8 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [queueing, setQueueing] = useState(false);
   const [queueJob, setQueueJob] = useState<RenderJob | null>(null);
+  const [seoBusy, setSeoBusy] = useState(false);
+  const [seoError, setSeoError] = useState('');
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -77,6 +80,48 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
   };
 
   const assemblyReady = hasVoiceover && readyAssets.length > 0;
+
+  /**
+   * Writes the YouTube listing for a video that does not have one yet.
+   *
+   * Only the Produce pipeline used to generate this, so anything assembled by hand had no
+   * title, description or tags at all — and no way to get them.
+   */
+  const handleGenerateSeo = async () => {
+    if (!selected || !latestProject || seoBusy) return;
+    if (!selected.script_content?.trim()) {
+      setSeoError('This video has no script yet — write one in the Scripts tab first.');
+      return;
+    }
+
+    setSeoBusy(true);
+    setSeoError('');
+
+    const { metadata, error } = await generateMetadata({
+      title: selected.title,
+      niche: selected.niche,
+      script: selected.script_content,
+    });
+
+    if (error || !metadata) {
+      setSeoError(error ?? 'Could not generate the listing.');
+      setSeoBusy(false);
+      return;
+    }
+
+    await supabase
+      .from('script_projects')
+      .update({
+        youtube_title: metadata.title,
+        youtube_description: metadata.description,
+        youtube_tags: metadata.tags,
+      })
+      .eq('id', latestProject.id);
+
+    await load();
+    onRefresh();
+    setSeoBusy(false);
+  };
 
   /**
    * Hands the render to the worker instead of doing it here. Polling stops as soon as the
@@ -360,6 +405,16 @@ export default function Assembly({ onRefresh }: AssemblyProps) {
                       )}
                     </div>
                   </div>
+                )}
+
+                {/* YouTube listing — title, description, tags and thumbnail */}
+                {latestProject && (
+                  <SeoPanel
+                    project={latestProject}
+                    onGenerate={handleGenerateSeo}
+                    generating={seoBusy}
+                    error={seoError}
+                  />
                 )}
 
                 {/* Voiceover player */}
