@@ -12,7 +12,7 @@ import { NICHES, type Niche } from '@/lib/constants';
 import { produceVideo, loadProject, type PipelineState, type PipelineStep } from '@/lib/pipeline';
 import {
   Wand2, Check, Loader2, AlertCircle, Clock, Download, ExternalLink, Copy,
-  Youtube, Image as ImageIcon, Tag, Sparkles, RotateCcw,
+  Youtube, Image as ImageIcon, Tag, Sparkles, RotateCcw, Music,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -31,6 +31,8 @@ export default function Produce({ onRefresh }: ProduceProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [publishToYouTube, setPublishToYouTube] = useState(false);
   const [privacyStatus, setPrivacyStatus] = useState<'private' | 'unlisted' | 'public'>('private');
+  const [musicEnabled, setMusicEnabled] = useState(true);
+  const [musicPrompt, setMusicPrompt] = useState('');
 
   const [state, setState] = useState<PipelineState | null>(null);
   const [running, setRunning] = useState(false);
@@ -63,6 +65,8 @@ export default function Produce({ onRefresh }: ProduceProps) {
         voiceId: voiceId || undefined,
         publishToYouTube,
         privacyStatus,
+        musicEnabled,
+        musicPrompt: musicPrompt.trim(),
       },
       setState,
     );
@@ -195,6 +199,39 @@ export default function Produce({ onRefresh }: ProduceProps) {
 
             <div className="pt-1 space-y-3 border-t border-ink-700">
               <label className="flex items-start gap-2.5 cursor-pointer pt-3">
+                <input
+                  type="checkbox"
+                  checked={musicEnabled}
+                  onChange={(e) => setMusicEnabled(e.target.checked)}
+                  disabled={running}
+                  className="mt-0.5 w-4 h-4 rounded accent-brand-500 shrink-0"
+                />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-sm font-medium text-white">
+                    <Music className="w-3.5 h-3.5 text-brand-400" />
+                    Background music
+                  </span>
+                  <span className="block text-xs text-ink-500 mt-0.5 leading-relaxed">
+                    Generated to suit the niche and ducked under the narration, so it drops while
+                    you're speaking and lifts in the gaps.
+                  </span>
+                </span>
+              </label>
+
+              {musicEnabled && showAdvanced && (
+                <div className="pl-6">
+                  <input
+                    type="text"
+                    value={musicPrompt}
+                    onChange={(e) => setMusicPrompt(e.target.value)}
+                    disabled={running}
+                    placeholder="Mood (optional) — e.g. tense low strings, sparse"
+                    className="w-full px-3 py-2 rounded-lg bg-ink-800 border border-ink-700 text-sm text-white placeholder-ink-500 focus:outline-none focus:border-brand-500 disabled:opacity-50"
+                  />
+                </div>
+              )}
+
+              <label className="flex items-start gap-2.5 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={publishToYouTube}

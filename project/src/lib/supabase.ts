@@ -51,6 +51,8 @@ export interface ScriptProject {
   compiled_video_url: string;
   /** True when the stored file is the downscaled preview rather than the master. */
   compiled_is_preview: boolean;
+  music_url: string;
+  music_prompt: string;
   youtube_title: string;
   youtube_description: string;
   youtube_tags: string[];
@@ -236,6 +238,8 @@ export interface RenderJob {
   youtube_video_id: string;
   /** A failed publish doesn't fail the job — the render still succeeded. */
   publish_error: string;
+  music_enabled: boolean;
+  music_prompt: string;
   worker_id: string;
   claimed_at: string | null;
   created_at: string;
@@ -251,6 +255,10 @@ export async function enqueueRender(params: {
   privacyStatus?: 'private' | 'unlisted' | 'public';
   /** Only used when the project has no voiceover yet; the worker narrates it. */
   voiceId?: string;
+  /** Background music bed, ducked under the narration. On by default. */
+  musicEnabled?: boolean;
+  /** Overrides the niche default mood for this job. */
+  musicPrompt?: string;
 }): Promise<{ job?: RenderJob; error?: string }> {
   const { data, error } = await supabase
     .from('render_jobs')
@@ -260,6 +268,8 @@ export async function enqueueRender(params: {
       publish_to_youtube: params.publishToYouTube ?? false,
       privacy_status: params.privacyStatus ?? 'private',
       voice_id: params.voiceId ?? '',
+      music_enabled: params.musicEnabled ?? true,
+      music_prompt: params.musicPrompt ?? '',
     })
     .select()
     .single();

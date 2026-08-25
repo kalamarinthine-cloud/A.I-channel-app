@@ -48,11 +48,17 @@ export async function probeDuration(file) {
  * Output is H.264/AAC in MP4 rather than the browser path's WebM: it is what YouTube
  * prefers, and it plays anywhere without transcoding.
  */
-export async function renderVideo({ audioPath, clipPaths, segmentSeconds, outPath, onLine }) {
+export async function renderVideo({ audioPath, clipPaths, segmentSeconds, musicPath, outPath, onLine }) {
   const args = ['-y', '-i', audioPath];
 
   for (const clip of clipPaths) {
     args.push('-stream_loop', '-1', '-t', segmentSeconds.toFixed(3), '-i', clip);
+  }
+
+  // Music is the last input, looped to cover the whole narration.
+  const musicIndex = clipPaths.length + 1;
+  if (musicPath) {
+    args.push('-stream_loop', '-1', '-i', musicPath);
   }
 
   const filters = clipPaths
@@ -62,12 +68,28 @@ export async function renderVideo({ audioPath, clipPaths, segmentSeconds, outPat
     .join(';');
 
   const concatInputs = clipPaths.map((_, i) => `[v${i}]`).join('');
-  const filterGraph = `${filters};${concatInputs}concat=n=${clipPaths.length}:v=1:a=0[outv]`;
+  let filterGraph = `${filters};${concatInputs}concat=n=${clipPaths.length}:v=1:a=0[outv]`;
+
+  // Sidechain ducking: the narration drives a compressor on the music, so the bed drops
+  // while someone is speaking and lifts again in the gaps. Measured at about 6 dB of
+  // ducking, which is audible without the music disappearing entirely.
+  if (musicPath) {
+    filterGraph +=
+      `;[${musicIndex}:a]volume=0.30,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[music]` +
+      `;[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asplit=2[voice][key]` +
+      `;[music][key]sidechaincompress=threshold=0.02:ratio=8:attack=5:release=350[ducked]` +
+      // normalize=0 is essential: amix otherwise divides every input by the number of
+      // inputs, so simply adding music would drop the narration by 6 dB. The limiter
+      // afterwards catches any peaks from summing without that attenuation.
+      // duration=first keeps the mix to the narration's length, so the looping music stops
+      // with the video rather than extending it.
+      `;[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[outa]`;
+  }
 
   args.push(
     '-filter_complex', filterGraph,
     '-map', '[outv]',
-    '-map', '0:a',
+    '-map', musicPath ? '[outa]' : '0:a',
     '-c:v', 'libx264',
     // `medium` compresses far better than `veryfast` for a modest time cost, and we are
     // no longer racing real time. crf 23 with a hard bitrate ceiling keeps the output
@@ -96,23 +118,34 @@ export async function renderVideo({ audioPath, clipPaths, segmentSeconds, outPat
  * video lands comfortably under 50 MB. Re-encoding the finished file is much faster than
  * rendering again from the source clips.
  */
-export async function renderPreview({ sourcePath, outPath }) {
+export async function renderPreview({ sourcePath, outPath, durationSeconds, budgetMb = 45 }) {
+  // Size the preview to the budget rather than using fixed settings. A fixed bitrate that
+  // fits a ten-minute video does not fit a twenty-seven-minute one, and a preview that
+  // overshoots the storage limit is useless — it fails at exactly the same place the
+  // master did.
+  const audioKbps = 64;
+  const totalKbps = Math.floor((budgetMb * 8 * 1024) / Math.max(durationSeconds, 1));
+  const videoKbps = Math.max(totalKbps - audioKbps, 80);
+
+  // Below roughly 300 kbps, 480p falls apart into blocking; 360p spends those bits better.
+  const scale = videoKbps < 300 ? 'scale=640:360' : 'scale=854:480';
+
   await run('ffmpeg', [
     '-y',
     '-i', sourcePath,
-    '-vf', 'scale=854:480',
+    '-vf', scale,
     '-c:v', 'libx264',
     '-preset', 'veryfast',
-    '-crf', '30',
-    '-maxrate', '500k',
-    '-bufsize', '1M',
+    '-b:v', `${videoKbps}k`,
+    '-maxrate', `${Math.round(videoKbps * 1.3)}k`,
+    '-bufsize', `${videoKbps * 2}k`,
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac',
-    '-b:a', '96k',
+    '-b:a', `${audioKbps}k`,
     '-movflags', '+faststart',
     outPath,
   ]);
-  return outPath;
+  return { path: outPath, videoKbps, scale };
 }
 
 /**

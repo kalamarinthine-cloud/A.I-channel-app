@@ -6,6 +6,7 @@ import { checkFont, probeDuration, renderVideo, renderPreview, renderThumbnail }
 import { hasCredentials, uploadVideo, setThumbnail } from './youtube.js';
 import { pruneMasters } from './retention.js';
 import { synthesise } from './tts.js';
+import { generateMusic, promptForNiche } from './music.js';
 
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
@@ -202,6 +203,45 @@ async function processJob(job) {
     }
     if (clipPaths.length === 0) throw new Error('None of the B-roll clips could be downloaded');
 
+    // --- music ----------------------------------------------------------------
+    // Generated once per project and reused, like the voiceover, so re-rendering a video
+    // never re-bills for a track that already exists. A failure here is a warning: a video
+    // without a music bed is still a finished video.
+    let musicPath = null;
+
+    if (job.music_enabled) {
+      try {
+        let musicUrl = project.music_url;
+
+        if (!musicUrl) {
+          await setStage(job.id, 'music');
+          const { data: video } = await supabase
+            .from('videos').select('niche').eq('id', job.video_id).single();
+          const prompt = job.music_prompt || project.music_prompt || promptForNiche(video?.niche);
+
+          const mp3 = await generateMusic({ prompt, onProgress: (m) => log(`music: ${m}`) });
+
+          const key = `${job.video_id}/${Date.now()}.mp3`;
+          const { error: musicUploadError } = await supabase.storage
+            .from('music')
+            .upload(key, mp3, { contentType: 'audio/mpeg', upsert: false });
+          if (musicUploadError) throw new Error(musicUploadError.message);
+
+          musicUrl = supabase.storage.from('music').getPublicUrl(key).data.publicUrl;
+          await supabase
+            .from('script_projects')
+            .update({ music_url: musicUrl, music_prompt: prompt })
+            .eq('id', job.project_id);
+          log(`music saved (${(mp3.length / 1024).toFixed(0)} KB)`);
+        }
+
+        musicPath = await download(musicUrl, path.join(workDir, 'music.mp3'));
+      } catch (err) {
+        log(`music skipped: ${err.message}`);
+        musicPath = null;
+      }
+    }
+
     // --- render -------------------------------------------------------------
     const totalDuration = await probeDuration(audioPath);
     const maxSegments = Math.max(1, Math.floor(totalDuration / MIN_SEGMENT_SECONDS));
@@ -217,6 +257,7 @@ async function processJob(job) {
       audioPath,
       clipPaths: used,
       segmentSeconds,
+      musicPath,
       outPath,
       onLine: () => {},
     });
@@ -302,26 +343,42 @@ async function processJob(job) {
     };
 
     let attempt = await uploadTo(masterBytes, `${stamp}.mp4`);
+    const tooLarge = (e) => e && /exceeded the maximum allowed size/i.test(e.message);
 
-    if (attempt.error && /exceeded the maximum allowed size/i.test(attempt.error.message)) {
-      log(`master too large for Storage at ${sizeMb.toFixed(1)} MB — storing a 480p preview instead`);
+    if (tooLarge(attempt.error)) {
+      log(`master too large for Storage at ${sizeMb.toFixed(1)} MB — encoding a preview to fit`);
       await setStage(job.id, 'preview');
       storedPath = path.join(workDir, 'preview.mp4');
-      await renderPreview({ sourcePath: outPath, outPath: storedPath });
+      const { videoKbps, scale } = await renderPreview({
+        sourcePath: outPath,
+        outPath: storedPath,
+        durationSeconds: totalDuration,
+      });
       storedBytes = await readFile(storedPath);
       isPreview = true;
-      log(`preview is ${(storedBytes.length / (1024 * 1024)).toFixed(1)} MB`);
+      log(`preview is ${(storedBytes.length / (1024 * 1024)).toFixed(1)} MB (${scale}, ${videoKbps}k)`);
       await setStage(job.id, 'uploading');
       attempt = await uploadTo(storedBytes, `${stamp}-preview.mp4`);
     }
 
-    if (attempt.error) throw new Error(`Video upload failed: ${attempt.error.message}`);
+    // A preview that still will not fit must not discard a master that rendered perfectly.
+    // The finished video exists on disk and, if publishing was requested, on YouTube; the
+    // in-app copy is a convenience, so its absence is a warning rather than a failure.
+    let outputUrl = '';
+    let storageNote = '';
 
-    const videoName = attempt.name;
-    const videoKey = attempt.key;
-
-    const outputUrl = supabase.storage.from('compiled_videos').getPublicUrl(videoKey).data.publicUrl;
-    await pruneBucket('compiled_videos', `${job.video_id}/${job.project_id}`, videoName);
+    if (tooLarge(attempt.error)) {
+      storageNote =
+        `Too large for Storage even as a preview (${(storedBytes.length / (1024 * 1024)).toFixed(1)} MB). ` +
+        `The full-quality video is in your masters folder` +
+        (youtubeVideoId ? ' and on YouTube.' : '.');
+      log(storageNote);
+    } else if (attempt.error) {
+      throw new Error(`Video upload failed: ${attempt.error.message}`);
+    } else {
+      outputUrl = supabase.storage.from('compiled_videos').getPublicUrl(attempt.key).data.publicUrl;
+      await pruneBucket('compiled_videos', `${job.video_id}/${job.project_id}`, attempt.name);
+    }
 
     try {
       const thumbName = `${stamp}.jpg`;
@@ -338,7 +395,8 @@ async function processJob(job) {
     }
 
     // --- record ---------------------------------------------------------------
-    const projectPatch = { compiled_video_url: outputUrl, compiled_is_preview: isPreview };
+    const projectPatch = { compiled_is_preview: isPreview };
+    if (outputUrl) projectPatch.compiled_video_url = outputUrl;
     if (thumbnailUrl) projectPatch.thumbnail_url = thumbnailUrl;
     if (youtubeVideoId) {
       projectPatch.youtube_video_id = youtubeVideoId;
@@ -362,7 +420,7 @@ async function processJob(job) {
         output_url: outputUrl,
         thumbnail_url: thumbnailUrl,
         youtube_video_id: youtubeVideoId,
-        publish_error: publishError,
+        publish_error: [publishError, storageNote].filter(Boolean).join(' | '),
         finished_at: new Date().toISOString(),
       })
       .eq('id', job.id);

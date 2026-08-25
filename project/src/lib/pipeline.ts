@@ -14,6 +14,7 @@ import {
 
 const STAGE_LABELS: Record<string, string> = {
   claimed: 'Worker picked up the job…',
+  music: 'Composing background music…',
   voiceover: 'Narrating the script…',
   downloading: 'Downloading voiceover and clips…',
   rendering: 'Rendering with FFmpeg…',
@@ -82,6 +83,9 @@ export interface ProduceOptions {
   /** Publish to YouTube as soon as the render finishes. Off by default. */
   publishToYouTube?: boolean;
   privacyStatus?: 'private' | 'unlisted' | 'public';
+  /** Background music bed under the narration. On by default. */
+  musicEnabled?: boolean;
+  musicPrompt?: string;
 }
 
 const STEP_LABELS: Record<StepId, string> = {
@@ -320,6 +324,8 @@ export async function produceVideo(
     publishToYouTube: options.publishToYouTube,
     privacyStatus: options.privacyStatus,
     voiceId,
+    musicEnabled: options.musicEnabled,
+    musicPrompt: options.musicPrompt,
   });
 
   if (enqueueError || !job) {
