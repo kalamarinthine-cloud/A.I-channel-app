@@ -53,6 +53,15 @@ export interface ScriptProject {
   compiled_is_preview: boolean;
   music_url: string;
   music_prompt: string;
+  /** Where the full-quality render sits on the worker's disk. Clips are cut from it. */
+  master_path: string;
+  /** When each narrated word is spoken, which is what captions are timed against. */
+  word_timings: Array<{ w: string; s: number; e: number }>;
+  /** Set to ask the worker to align an older voiceover that has no timings yet. */
+  align_requested: boolean;
+  /** Why the last alignment failed. Alignment runs on the worker, so without this the
+   *  app cannot tell a failure apart from work still in progress. */
+  align_error: string;
   youtube_title: string;
   youtube_description: string;
   youtube_tags: string[];
@@ -355,6 +364,96 @@ export async function uploadToYouTube(params: {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return { error: data.error ?? `YouTube upload failed (${res.status})` };
     return { youtubeVideoId: data.youtubeVideoId };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Network error' };
+  }
+}
+
+/* ---------------------------------------------------------------- clips --- */
+
+export type ClipStatus = 'proposed' | 'queued' | 'rendering' | 'ready' | 'error';
+export type CaptionStyle = 'bold' | 'karaoke' | 'minimal' | 'boxed' | 'none';
+export type Reframe = 'crop' | 'blur';
+
+export interface Clip {
+  id: string;
+  video_id: string;
+  project_id: string;
+  title: string;
+  reason: string;
+  score: number;
+  transcript: string;
+  start_seconds: number;
+  end_seconds: number;
+  caption_style: CaptionStyle;
+  reframe: Reframe;
+  status: ClipStatus;
+  stage: string;
+  attempts: number;
+  error: string;
+  output_url: string;
+  thumbnail_url: string;
+  duration_seconds: number;
+  publish_to_youtube: boolean;
+  privacy_status: 'private' | 'unlisted' | 'public';
+  youtube_video_id: string;
+  publish_error: string;
+  created_at: string;
+  finished_at: string | null;
+}
+
+/** Mirrors the presets the worker knows about in captions.js. */
+export const CAPTION_STYLE_OPTIONS: Array<{ id: CaptionStyle; label: string; description: string }> = [
+  { id: 'bold', label: 'Bold', description: 'Big uppercase, active word in yellow' },
+  { id: 'karaoke', label: 'Karaoke', description: 'Words light up in cyan as spoken' },
+  { id: 'minimal', label: 'Minimal', description: 'Clean sentence case, no highlight' },
+  { id: 'boxed', label: 'Boxed', description: 'White text on a solid bar' },
+  { id: 'none', label: 'None', description: 'No captions' },
+];
+
+export const REFRAME_OPTIONS: Array<{ id: Reframe; label: string; description: string }> = [
+  { id: 'crop', label: 'Fill', description: 'Crop the sides away for a full-bleed frame' },
+  { id: 'blur', label: 'Fit', description: 'Whole frame, blurred fill above and below' },
+];
+
+export const CLIP_STAGE_LABELS: Record<string, string> = {
+  claimed: 'Worker picked it up…',
+  sourcing: 'Finding the source video…',
+  captions: 'Timing the captions…',
+  rendering: 'Cutting and captioning…',
+  publishing: 'Publishing to YouTube…',
+  uploading: 'Saving the clip…',
+  done: 'Done',
+};
+
+export interface ProposedClip {
+  title: string;
+  reason: string;
+  score: number;
+  transcript: string;
+  start_seconds: number;
+  end_seconds: number;
+}
+
+/**
+ * Asks Claude for the moments worth cutting. Returns proposals only — nothing is written
+ * or rendered until they are saved, so re-running this is cheap and discards nothing.
+ */
+export async function findClips(params: {
+  title: string;
+  niche: string;
+  words: Array<{ w: string; s: number; e: number }>;
+  count?: number;
+}): Promise<{ clips?: ProposedClip[]; skipped?: string[]; error?: string }> {
+  try {
+    const res = await fetch(edgeUrl('find-clips'), {
+      method: 'POST',
+      headers: edgeHeaders(),
+      body: JSON.stringify(params),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error ?? `Clip search failed (${res.status})` };
+    return { clips: data.clips, skipped: data.skipped };
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Network error' };
   }

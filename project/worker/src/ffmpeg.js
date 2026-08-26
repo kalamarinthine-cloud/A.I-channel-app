@@ -149,6 +149,83 @@ export async function renderPreview({ sourcePath, outPath, durationSeconds, budg
 }
 
 /**
+ * Cuts a vertical clip out of a finished video and burns captions into it.
+ *
+ * `-ss` and `-t` go before `-i` so FFmpeg seeks rather than decoding and discarding
+ * everything up to the cut — on a twenty-seven-minute master that is the difference between
+ * seconds and minutes. Modern FFmpeg still seeks accurately this way when re-encoding.
+ *
+ * Two ways to turn 16:9 into 9:16:
+ * - `crop` fills the frame and throws away the sides. Right for B-roll, where nothing is
+ *   composed to the centre and a full-bleed frame reads as native vertical video.
+ * - `blur` fits the whole frame and fills the space above and below with a blurred blow-up
+ *   of itself, so nothing is lost when the shot's edges matter.
+ */
+export async function renderClip({
+  sourcePath,
+  startSeconds,
+  durationSeconds,
+  reframe = 'crop',
+  assPath = '',
+  outPath,
+  onLine,
+}) {
+  const fill = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1';
+
+  const reframeGraph =
+    reframe === 'blur'
+      ? '[0:v]split=2[bg][fg];' +
+        `[bg]${fill},gblur=sigma=32[bgblur];` +
+        '[fg]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fgfit];' +
+        '[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2[framed]'
+      : `[0:v]${fill}[framed]`;
+
+  // fps is pinned after reframing so caption timing is not at the mercy of a variable
+  // frame rate in the source.
+  const graph = assPath
+    ? `${reframeGraph};[framed]fps=30,ass=${escapePath(assPath)}[vout]`
+    : `${reframeGraph};[framed]fps=30[vout]`;
+
+  await runWithProgress('ffmpeg', [
+    '-y',
+    '-ss', startSeconds.toFixed(3),
+    '-t', durationSeconds.toFixed(3),
+    '-i', sourcePath,
+    '-filter_complex', graph,
+    '-map', '[vout]',
+    '-map', '0:a',
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    // Shorts are re-encoded hard by every platform, so the upload wants headroom: crf 20
+    // rather than the 23 used for long-form. A minute of this is still only a few MB.
+    '-crf', '20',
+    '-maxrate', '8M',
+    '-bufsize', '16M',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '160k',
+    '-ar', '48000',
+    '-movflags', '+faststart',
+    outPath,
+  ], onLine);
+
+  return outPath;
+}
+
+/** A single frame from a clip, used as its poster in the app. */
+export async function renderClipPoster({ sourcePath, atSeconds, outPath }) {
+  await run('ffmpeg', [
+    '-y',
+    '-ss', Math.max(0, atSeconds).toFixed(3),
+    '-i', sourcePath,
+    '-frames:v', '1',
+    '-vf', 'scale=540:960',
+    outPath,
+  ]);
+  return outPath;
+}
+
+/**
  * Builds the thumbnail: a frame from the opening clip, darkened toward the bottom, with
  * the title over it. Text is passed via textfile so titles containing colons, quotes or
  * commas can't break the filter syntax — drawtext's escaping rules are a menace.

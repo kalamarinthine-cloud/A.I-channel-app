@@ -2,10 +2,20 @@ import { createClient } from '@supabase/supabase-js';
 import { copyFile, mkdir, mkdtemp, readdir, rm, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { checkFont, probeDuration, renderVideo, renderPreview, renderThumbnail } from './ffmpeg.js';
+import {
+  checkFont,
+  probeDuration,
+  renderVideo,
+  renderPreview,
+  renderThumbnail,
+  renderClip,
+  renderClipPoster,
+} from './ffmpeg.js';
 import { hasCredentials, uploadVideo, setThumbnail } from './youtube.js';
 import { pruneMasters } from './retention.js';
 import { synthesise } from './tts.js';
+import { forceAlign } from './align.js';
+import { buildAss, wordsInWindow } from './captions.js';
 import { generateMusic, promptForNiche } from './music.js';
 
 const SUPABASE_URL = required('SUPABASE_URL');
@@ -160,7 +170,7 @@ async function processJob(job) {
       const voiceId = project.voiceover_voice || job.voice_id;
       if (!voiceId) throw new Error('No voice selected for this project');
 
-      const mp3 = await synthesise({
+      const { mp3, words } = await synthesise({
         script: project.script_content,
         voiceId,
         onProgress: (msg) => log(`tts: ${msg}`),
@@ -174,9 +184,12 @@ async function processJob(job) {
 
       voiceoverUrl = supabase.storage.from('voiceovers').getPublicUrl(key).data.publicUrl;
 
+      // Word timings come back with the audio and are what captions are cut against later.
+      // Stored now because regenerating them afterwards costs a second API call.
+      log(`voiceover timed to ${words.length} words`);
       await supabase
         .from('script_projects')
-        .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId })
+        .update({ voiceover_url: voiceoverUrl, voiceover_voice: voiceId, word_timings: words })
         .eq('id', job.project_id);
       await supabase
         .from('videos')
@@ -265,7 +278,13 @@ async function processJob(job) {
     log(`rendered in ${renderSeconds.toFixed(1)}s (${(totalDuration / renderSeconds).toFixed(1)}x real time)`);
 
     // Archive the master first — before publishing or uploading, so neither can lose it.
-    await saveMaster(outPath, project.youtube_title || `video-${job.video_id.slice(0, 8)}`, log);
+    // The path is recorded because clips are cut from the master: Storage may only hold a
+    // 480p preview, which is far too soft to crop into a vertical frame.
+    const masterPath = await saveMaster(
+      outPath,
+      project.youtube_title || `video-${job.video_id.slice(0, 8)}`,
+      log,
+    );
 
     // --- thumbnail ----------------------------------------------------------
     await setStage(job.id, 'thumbnail');
@@ -396,6 +415,7 @@ async function processJob(job) {
 
     // --- record ---------------------------------------------------------------
     const projectPatch = { compiled_is_preview: isPreview };
+    if (masterPath) projectPatch.master_path = masterPath;
     if (outputUrl) projectPatch.compiled_video_url = outputUrl;
     if (thumbnailUrl) projectPatch.thumbnail_url = thumbnailUrl;
     if (youtubeVideoId) {
@@ -442,6 +462,237 @@ async function processJob(job) {
   }
 }
 
+async function setClipStage(clipId, stage) {
+  await supabase.from('clips').update({ stage }).eq('id', clipId);
+}
+
+/**
+ * Finds the best available copy of a finished video to cut a clip from.
+ *
+ * Preference order matters. The master on disk is full quality; the Storage copy is often a
+ * 480p preview, and cropping a 480p frame to vertical leaves roughly 270 pixels of width —
+ * unusable. The middle case covers videos rendered before master_path was recorded: the
+ * file is almost certainly still there, named after the video, so it is worth looking for
+ * before falling back to the preview.
+ */
+async function resolveClipSource({ project, workDir, log }) {
+  if (project.master_path) {
+    try {
+      await stat(project.master_path);
+      return { path: project.master_path, quality: 'master' };
+    } catch {
+      log(`recorded master ${project.master_path} is gone, looking for another copy`);
+    }
+  }
+
+  if (MASTERS_DIR && project.youtube_title) {
+    try {
+      const wanted = `${toFilename(project.youtube_title)}.mp4`;
+      const matches = (await readdir(MASTERS_DIR)).filter((name) => name.endsWith(wanted));
+      if (matches.length > 0) {
+        // Names are date-prefixed, so the last one sorted is the most recent render.
+        const found = path.join(MASTERS_DIR, matches.sort().pop());
+        log(`matched master by title: ${found}`);
+        return { path: found, quality: 'master' };
+      }
+    } catch (err) {
+      log(`could not search the masters folder: ${err.message}`);
+    }
+  }
+
+  if (project.compiled_video_url) {
+    log('no master on disk — falling back to the copy in Storage');
+    const downloaded = await download(project.compiled_video_url, path.join(workDir, 'source.mp4'));
+    return { path: downloaded, quality: project.compiled_is_preview ? 'preview' : 'master' };
+  }
+
+  throw new Error(
+    'No video file to cut from. The master is not in the masters folder and there is no ' +
+    'copy in Storage — re-render this video before clipping it.',
+  );
+}
+
+/**
+ * Word timings for a project, aligning the narration first if it has none.
+ *
+ * Anything narrated since timings were added already has them. Older videos are aligned
+ * once here and the result cached, so the cost is paid by the first clip cut from a given
+ * video and never again.
+ */
+async function resolveWordTimings({ project, workDir, log }) {
+  const existing = Array.isArray(project.word_timings) ? project.word_timings : [];
+  if (existing.length > 0) return existing;
+
+  if (!project.voiceover_url) throw new Error('This video has no voiceover to align captions against');
+
+  log('no word timings stored — aligning the narration');
+  const audioPath = await download(project.voiceover_url, path.join(workDir, 'align.mp3'));
+  const words = await forceAlign({
+    audio: await readFile(audioPath),
+    script: project.script_content,
+    onProgress: (msg) => log(`align: ${msg}`),
+  });
+
+  await supabase
+    .from('script_projects')
+    .update({ word_timings: words, align_error: '' })
+    .eq('id', project.id);
+  return words;
+}
+
+async function processClip(clip) {
+  const workDir = await mkdtemp(path.join(tmpdir(), `clip-${clip.id}-`));
+  log(`claimed clip ${clip.id} (attempt ${clip.attempts})`);
+
+  try {
+    const { data: project } = await supabase
+      .from('script_projects').select('*').eq('id', clip.project_id).single();
+    if (!project) throw new Error('Project row not found');
+
+    const start = Number(clip.start_seconds);
+    const end = Number(clip.end_seconds);
+    const duration = end - start;
+    if (!(duration > 0)) throw new Error('Clip has no duration — check its start and end times');
+
+    // --- source ---------------------------------------------------------------
+    await setClipStage(clip.id, 'sourcing');
+    const source = await resolveClipSource({ project, workDir, log });
+    if (source.quality === 'preview') {
+      log('WARNING: cutting from a 480p preview, so this clip will be soft');
+    }
+
+    // --- captions -------------------------------------------------------------
+    // A caption failure must not cost the clip: silent vertical video is still usable, and
+    // the style can be changed and re-rendered afterwards.
+    let assPath = '';
+    if (clip.caption_style && clip.caption_style !== 'none') {
+      try {
+        await setClipStage(clip.id, 'captions');
+        const words = await resolveWordTimings({ project, workDir, log });
+        const inWindow = wordsInWindow(words, start, end);
+        const ass = buildAss({ words: inWindow, styleName: clip.caption_style });
+        if (ass) {
+          assPath = path.join(workDir, 'captions.ass');
+          await writeFile(assPath, ass, 'utf8');
+          log(`captions: ${inWindow.length} words in ${clip.caption_style} style`);
+        } else {
+          log('captions: no words fall inside this window');
+        }
+      } catch (err) {
+        log(`captions skipped: ${err.message}`);
+        assPath = '';
+      }
+    }
+
+    // --- render ---------------------------------------------------------------
+    await setClipStage(clip.id, 'rendering');
+    const outPath = path.join(workDir, 'clip.mp4');
+    const startedAt = Date.now();
+    await renderClip({
+      sourcePath: source.path,
+      startSeconds: start,
+      durationSeconds: duration,
+      reframe: clip.reframe || 'crop',
+      assPath,
+      outPath,
+      onLine: () => {},
+    });
+    log(`cut ${duration.toFixed(1)}s in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+
+    const posterPath = path.join(workDir, 'poster.jpg');
+    try {
+      await renderClipPoster({ sourcePath: outPath, atSeconds: duration / 2, outPath: posterPath });
+    } catch (err) {
+      log(`poster failed, continuing: ${err.message}`);
+    }
+
+    // --- publish --------------------------------------------------------------
+    // Before the Storage upload, for the same reason as full videos: publishing is what
+    // must not be blocked by anything to do with the in-app copy.
+    let youtubeVideoId = '';
+    let publishError = '';
+
+    if (clip.publish_to_youtube) {
+      await setClipStage(clip.id, 'publishing');
+      try {
+        if (!hasCredentials()) {
+          throw new Error(
+            'YouTube credentials are not set on the worker. Add YOUTUBE_CLIENT_ID, ' +
+            'YOUTUBE_CLIENT_SECRET and YOUTUBE_REFRESH_TOKEN to worker/.env.',
+          );
+        }
+        youtubeVideoId = await uploadVideo({
+          filePath: outPath,
+          title: clip.title || project.youtube_title || 'Untitled',
+          // YouTube decides what is a Short from the aspect ratio and duration, but the
+          // hashtag is what reliably files it under the channel's Shorts shelf.
+          description: `${clip.title || ''}\n\n#Shorts`.trim(),
+          tags: project.youtube_tags,
+          privacyStatus: clip.privacy_status || 'private',
+          onProgress: (msg) => log(`youtube: ${msg}`),
+        });
+        log(`published short as https://youtu.be/${youtubeVideoId}`);
+      } catch (err) {
+        publishError = String(err.message).slice(0, 2000);
+        log(`publish failed: ${publishError}`);
+      }
+    }
+
+    // --- upload ---------------------------------------------------------------
+    await setClipStage(clip.id, 'uploading');
+    const bytes = await readFile(outPath);
+    log(`clip is ${(bytes.length / (1024 * 1024)).toFixed(1)} MB`);
+
+    const key = `${clip.video_id}/${clip.id}.mp4`;
+    const { error: uploadError } = await supabase.storage
+      .from('clips')
+      .upload(key, bytes, { contentType: 'video/mp4', upsert: true });
+    if (uploadError) throw new Error(`Clip upload failed: ${uploadError.message}`);
+    const outputUrl = supabase.storage.from('clips').getPublicUrl(key).data.publicUrl;
+
+    let posterUrl = '';
+    try {
+      const posterKey = `${clip.video_id}/${clip.id}.jpg`;
+      const { error: posterError } = await supabase.storage
+        .from('clips')
+        .upload(posterKey, await readFile(posterPath), { contentType: 'image/jpeg', upsert: true });
+      if (!posterError) posterUrl = supabase.storage.from('clips').getPublicUrl(posterKey).data.publicUrl;
+    } catch {
+      // A clip without a poster frame is still a finished clip.
+    }
+
+    await supabase
+      .from('clips')
+      .update({
+        status: 'ready',
+        stage: 'done',
+        error: '',
+        output_url: outputUrl,
+        thumbnail_url: posterUrl,
+        duration_seconds: +duration.toFixed(3),
+        youtube_video_id: youtubeVideoId,
+        publish_error: publishError,
+        finished_at: new Date().toISOString(),
+      })
+      .eq('id', clip.id);
+
+    log(`clip ${clip.id} done`);
+  } catch (err) {
+    log(`clip ${clip.id} failed: ${err.message}`);
+    await supabase
+      .from('clips')
+      .update({
+        status: 'error',
+        stage: 'error',
+        error: String(err.message).slice(0, 2000),
+        finished_at: new Date().toISOString(),
+      })
+      .eq('id', clip.id);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
 async function claim() {
   const { data, error } = await supabase.rpc('claim_render_job', {
     worker: WORKER_ID,
@@ -449,6 +700,53 @@ async function claim() {
   });
   if (error) {
     log(`claim failed: ${error.message}`);
+    return null;
+  }
+  return Array.isArray(data) && data.length > 0 ? data[0] : null;
+}
+
+/**
+ * Aligns one project's narration on request, without rendering anything.
+ *
+ * This is what makes the back catalogue clippable: the audio and the script both already
+ * exist, so all that is missing is the mapping between them.
+ */
+async function processAlignment(project) {
+  const workDir = await mkdtemp(path.join(tmpdir(), `align-${project.id}-`));
+  log(`aligning project ${project.id}`);
+
+  try {
+    const words = await resolveWordTimings({ project, workDir, log });
+    log(`alignment stored: ${words.length} words`);
+  } catch (err) {
+    // Recorded on the project rather than only logged: this runs on the worker, so without
+    // this the app has no way to tell a failure from work still in progress.
+    log(`alignment failed for ${project.id}: ${err.message}`);
+    await supabase
+      .from('script_projects')
+      .update({ align_error: String(err.message).slice(0, 2000) })
+      .eq('id', project.id);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+async function claimAlignment() {
+  const { data, error } = await supabase.rpc('claim_alignment_job', { worker: WORKER_ID });
+  if (error) {
+    log(`alignment claim failed: ${error.message}`);
+    return null;
+  }
+  return Array.isArray(data) && data.length > 0 ? data[0] : null;
+}
+
+async function claimClip() {
+  const { data, error } = await supabase.rpc('claim_clip_job', {
+    worker: WORKER_ID,
+    stale_seconds: 900,
+  });
+  if (error) {
+    log(`clip claim failed: ${error.message}`);
     return null;
   }
   return Array.isArray(data) && data.length > 0 ? data[0] : null;
@@ -466,13 +764,30 @@ async function main() {
 
   log(`polling ${SUPABASE_URL} every ${POLL_INTERVAL_MS}ms`);
 
+  // Full renders are checked first: a clip is cut from a finished video, so a queued render
+  // is usually the thing standing between a queued clip and being able to run at all.
   while (!shuttingDown) {
     const job = await claim();
     if (job) {
       await processJob(job);
-    } else {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      continue;
     }
+
+    const clip = await claimClip();
+    if (clip) {
+      await processClip(clip);
+      continue;
+    }
+
+    // Cheapest of the three and a prerequisite for finding clips at all, so it is never
+    // left waiting behind a queue of renders.
+    const alignment = await claimAlignment();
+    if (alignment) {
+      await processAlignment(alignment);
+      continue;
+    }
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
   log('shut down cleanly');

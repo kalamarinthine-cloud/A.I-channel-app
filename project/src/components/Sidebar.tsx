@@ -1,6 +1,6 @@
-import { LayoutDashboard, Film, FileText, Clapperboard, Layers, FolderOpen, Wand2 } from 'lucide-react';
+import { LayoutDashboard, Film, FileText, Clapperboard, Layers, FolderOpen, Wand2, Scissors } from 'lucide-react';
 
-export type TabId = 'dashboard' | 'produce' | 'videos' | 'scripts' | 'broll' | 'assembly' | 'projects';
+export type TabId = 'dashboard' | 'produce' | 'videos' | 'scripts' | 'broll' | 'assembly' | 'clips' | 'projects';
 
 interface NavItem {
   id: TabId;
@@ -15,6 +15,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'scripts', label: 'Scripts', icon: FileText },
   { id: 'broll', label: 'B-Roll', icon: Clapperboard },
   { id: 'assembly', label: 'Assembly', icon: Layers },
+  { id: 'clips', label: 'Clips', icon: Scissors },
   { id: 'projects', label: 'Projects', icon: FolderOpen },
 ];
 

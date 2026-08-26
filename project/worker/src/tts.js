@@ -66,11 +66,56 @@ export function hasCredentials() {
 }
 
 /**
- * Narrates a script and returns MP3 bytes.
+ * Folds ElevenLabs' per-character alignment into whole words.
+ *
+ * The API times every character, including the spaces between words. Captions work in
+ * words, so each run of non-space characters becomes one entry spanning the first
+ * character's start to the last character's end.
+ *
+ * `offset` shifts a chunk's times into the timeline of the whole narration, since each
+ * chunk is timed from zero.
+ */
+export function alignmentToWords(alignment, offset = 0) {
+  const chars = alignment?.characters ?? [];
+  const starts = alignment?.character_start_times_seconds ?? [];
+  const ends = alignment?.character_end_times_seconds ?? [];
+  if (!chars.length || chars.length !== starts.length) return [];
+
+  const words = [];
+  let text = '';
+  let start = 0;
+  let end = 0;
+
+  const flush = () => {
+    if (text.trim()) words.push({ w: text, s: +(start + offset).toFixed(3), e: +(end + offset).toFixed(3) });
+    text = '';
+  };
+
+  for (let i = 0; i < chars.length; i++) {
+    if (/\s/.test(chars[i])) {
+      flush();
+      continue;
+    }
+    if (!text) start = starts[i];
+    text += chars[i];
+    end = ends[i] ?? starts[i];
+  }
+  flush();
+
+  return words;
+}
+
+/**
+ * Narrates a script and returns `{ mp3, words }`.
  *
  * Chunks are sent in order rather than in parallel: ElevenLabs uses the previous request
  * to carry voice state across a boundary, so out-of-order calls make the delivery drift
  * audibly between chunks.
+ *
+ * The /with-timestamps variant returns the same audio plus the time every character is
+ * spoken, for the same price and in the same call. Captions need those times, and asking
+ * for them here means a video is never narrated without them — the alternative is aligning
+ * the audio against the script afterwards, which is a second API call that can fail.
  */
 export async function synthesise({ script, voiceId, onProgress = () => {} }) {
   const apiKey = process.env.ELEVENLABS_API_KEY;
@@ -88,15 +133,17 @@ export async function synthesise({ script, voiceId, onProgress = () => {} }) {
   onProgress(`narrating ${cleaned.length} characters in ${chunks.length} part(s)`);
 
   const parts = [];
+  const words = [];
   let previousRequestId = null;
+  let offset = 0;
 
   for (const [i, chunk] of chunks.entries()) {
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/with-timestamps`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'xi-api-key': apiKey,
-        Accept: 'audio/mpeg',
+        Accept: 'application/json',
       },
       body: JSON.stringify({
         text: chunk,
@@ -119,10 +166,23 @@ export async function synthesise({ script, voiceId, onProgress = () => {} }) {
     }
 
     previousRequestId = res.headers.get('request-id');
-    parts.push(Buffer.from(await res.arrayBuffer()));
+
+    const payload = await res.json();
+    if (!payload.audio_base64) {
+      throw new Error(`ElevenLabs returned no audio on part ${i + 1} of ${chunks.length}`);
+    }
+    parts.push(Buffer.from(payload.audio_base64, 'base64'));
+
+    // normalized_alignment times the text as spoken ("twenty twenty-six" for "2026"),
+    // which is what the listener hears; alignment times the raw characters. Captions
+    // should read like the script, so the raw alignment is preferred where present.
+    const chunkWords = alignmentToWords(payload.alignment ?? payload.normalized_alignment, offset);
+    words.push(...chunkWords);
+    if (chunkWords.length > 0) offset = chunkWords[chunkWords.length - 1].e;
+
     onProgress(`narrated part ${i + 1}/${chunks.length}`);
   }
 
   // MP3 frames are self-contained, so concatenating encoded parts yields a valid stream.
-  return Buffer.concat(parts);
+  return { mp3: Buffer.concat(parts), words };
 }

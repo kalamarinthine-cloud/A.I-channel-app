@@ -6,6 +6,7 @@ import Videos from '@/views/Videos';
 import Scripts from '@/views/Scripts';
 import Broll from '@/views/Broll';
 import Assembly from '@/views/Assembly';
+import Clips from '@/views/Clips';
 import Projects from '@/views/Projects';
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
         {activeTab === 'scripts' && <Scripts onRefresh={triggerRefresh} />}
         {activeTab === 'broll' && <Broll onRefresh={triggerRefresh} />}
         {activeTab === 'assembly' && <Assembly onRefresh={triggerRefresh} />}
+        {activeTab === 'clips' && <Clips onRefresh={triggerRefresh} />}
         {activeTab === 'projects' && <Projects onRefresh={triggerRefresh} />}
       </main>
     </div>
