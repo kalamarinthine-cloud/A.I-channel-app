@@ -315,7 +315,11 @@ export default function Clips({ onRefresh }: ClipsProps) {
               </div>
             )}
 
-            {alignError && (
+            {/* Only while the timings are actually missing. A failed alignment that was
+                later resolved — or never needed, because the narration recorded its own
+                timings — leaves the error behind on the row, and showing it next to
+                "3162 words timed" reads as a broken video that is fine. */}
+            {alignError && wordCount === 0 && (
               <div className="flex items-start gap-2 p-3 rounded-lg bg-error-500/10 border border-error-500/30">
                 <AlertCircle className="w-4 h-4 text-error-400 shrink-0 mt-0.5" />
                 <div className="min-w-0">

@@ -493,6 +493,7 @@ async function resolveClipSource({ project, workDir, log }) {
         // Names are date-prefixed, so the last one sorted is the most recent render.
         const found = path.join(MASTERS_DIR, matches.sort().pop());
         log(`matched master by title: ${found}`);
+        await recordMasterPath({ project, found, log });
         return { path: found, quality: 'master' };
       }
     } catch (err) {
@@ -510,6 +511,27 @@ async function resolveClipSource({ project, workDir, log }) {
     'No video file to cut from. The master is not in the masters folder and there is no ' +
     'copy in Storage — re-render this video before clipping it.',
   );
+}
+
+/**
+ * Writes back a master found by title, so it is only ever searched for once.
+ *
+ * Title matching is a recovery path, not an addressing scheme: two videos can share a
+ * title, and renaming a file silently breaks it. Recording the path the first time a
+ * project is clipped narrows that window to the single lookup that found it, and every
+ * later clip of the same video resolves by path like one rendered after master_path
+ * existed.
+ *
+ * Failing to save is not worth losing a clip over — the path was resolved either way, and
+ * the next clip simply searches again.
+ */
+async function recordMasterPath({ project, found, log }) {
+  const { error } = await supabase
+    .from('script_projects')
+    .update({ master_path: found })
+    .eq('id', project.id);
+  if (error) log(`could not record the master path: ${error.message}`);
+  else log(`recorded master path for ${project.id}`);
 }
 
 /**
