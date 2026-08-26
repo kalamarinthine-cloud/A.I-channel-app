@@ -540,14 +540,22 @@ async function recordMasterPath({ project, found, log }) {
  * Anything narrated since timings were added already has them. Older videos are aligned
  * once here and the result cached, so the cost is paid by the first clip cut from a given
  * video and never again.
+ *
+ * `force` is for an alignment the user explicitly asked for, which must be able to replace
+ * timings that are already stored. Without it, timings that are present but wrong are
+ * permanent: the cache is checked before anything else, so every later request returns the
+ * bad values and re-aligning becomes impossible. Captions drifting against the dialogue is
+ * exactly what that looks like from the outside, and it is not something the user can
+ * otherwise recover from.
  */
-async function resolveWordTimings({ project, workDir, log }) {
+async function resolveWordTimings({ project, workDir, log, force = false }) {
   const existing = Array.isArray(project.word_timings) ? project.word_timings : [];
-  if (existing.length > 0) return existing;
+  if (existing.length > 0 && !force) return existing;
+  if (existing.length > 0) log(`replacing ${existing.length} stored timings on request`);
 
   if (!project.voiceover_url) throw new Error('This video has no voiceover to align captions against');
 
-  log('no word timings stored — aligning the narration');
+  log(existing.length > 0 ? 'aligning the narration again' : 'no word timings stored — aligning the narration');
   const audioPath = await download(project.voiceover_url, path.join(workDir, 'align.mp3'));
   const words = await forceAlign({
     audio: await readFile(audioPath),
@@ -738,7 +746,9 @@ async function processAlignment(project) {
   log(`aligning project ${project.id}`);
 
   try {
-    const words = await resolveWordTimings({ project, workDir, log });
+    // Forced: reaching here means the alignment was asked for, and the answer already on
+    // the row is the thing being replaced.
+    const words = await resolveWordTimings({ project, workDir, log, force: true });
     log(`alignment stored: ${words.length} words`);
   } catch (err) {
     // Recorded on the project rather than only logged: this runs on the worker, so without

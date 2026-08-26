@@ -43,6 +43,18 @@ function timecode(seconds: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
+/**
+ * Identifies a particular set of timings, so a re-time can be seen to have landed.
+ *
+ * The word count alone is not enough: re-aligning the same narration returns the same words
+ * with different times, which is the whole point of asking for it. The first and last times
+ * move whenever the alignment actually changes.
+ */
+function wordsSignature(words: Array<{ w: string; s: number; e: number }>): string {
+  if (words.length === 0) return 'none';
+  return `${words.length}:${words[0].s}:${words[0].e}:${words[words.length - 1].e}`;
+}
+
 /** Parses "1:23" or "83" back into seconds, returning null for anything else. */
 function parseTimecode(value: string): number | null {
   const trimmed = value.trim();
@@ -66,7 +78,9 @@ export default function Clips({ onRefresh }: ClipsProps) {
   const [error, setError] = useState('');
   const [notes, setNotes] = useState<string[]>([]);
   const [busyClipId, setBusyClipId] = useState<string | null>(null);
-  const [alignAsked, setAlignAsked] = useState(false);
+  // The signature of the timings at the moment a re-time was asked for, or null when none
+  // has been. Cleared once the stored timings differ from it.
+  const [alignAsked, setAlignAsked] = useState<string | null>(null);
 
   // Defaults applied to every clip found in the next search, so a whole batch can be
   // styled once rather than one card at a time.
@@ -113,8 +127,11 @@ export default function Clips({ onRefresh }: ClipsProps) {
   // Alignment has no status of its own: the request flag is cleared the moment the worker
   // claims it, so "in progress" is the window between asking and the timings appearing.
   const alignError = project?.align_error ?? '';
-  const aligning =
-    !!project && wordCount === 0 && !alignError && (project.align_requested || alignAsked);
+  // A re-time keeps the old timings on the row until the new ones land, so "in progress"
+  // cannot be inferred from their absence the way a first alignment can. The snapshot taken
+  // when the request was made is what says whether they have actually been replaced.
+  const alignedSince = alignAsked !== null && wordsSignature(words) === alignAsked;
+  const aligning = !!project && !alignError && (project.align_requested || alignedSince);
   const working =
     aligning || videoClips.some((c) => c.status === 'queued' || c.status === 'rendering');
 
@@ -146,7 +163,7 @@ export default function Clips({ onRefresh }: ClipsProps) {
 
   const handleAlign = async () => {
     if (!project) return;
-    setAlignAsked(true);
+    setAlignAsked(wordsSignature(words));
     setError('');
     await supabase
       .from('script_projects')
@@ -255,7 +272,7 @@ export default function Clips({ onRefresh }: ClipsProps) {
               </label>
               <select
                 value={selectedId ?? ''}
-                onChange={(e) => { setSelectedId(e.target.value); setError(''); setNotes([]); setAlignAsked(false); }}
+                onChange={(e) => { setSelectedId(e.target.value); setError(''); setNotes([]); setAlignAsked(null); }}
                 className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
               >
                 {clippable.map((v) => (
@@ -288,14 +305,28 @@ export default function Clips({ onRefresh }: ClipsProps) {
                     : alignError ? 'Alignment did not complete, so this video cannot be clipped yet.' : 'This video was narrated before word timings were recorded, so it needs matching up before it can be clipped.'}
               </p>
               {wordCount > 0 ? (
-                <button
-                  onClick={handleFind}
-                  disabled={finding || !project}
-                  className="shrink-0 inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-50"
-                >
-                  {finding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  {finding ? 'Reading the transcript…' : 'Find clips'}
-                </button>
+                <div className="shrink-0 flex items-center gap-2">
+                  {/* Timings can be present and still be wrong, which shows up as captions
+                      drifting against the dialogue. Re-timing is the only way out of that,
+                      so it has to be reachable even when nothing looks broken from here. */}
+                  <button
+                    onClick={handleAlign}
+                    disabled={aligning || !project?.voiceover_url}
+                    title="Re-time the captions against the narration, replacing the stored timings"
+                    className="inline-flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium bg-ink-800 hover:bg-ink-700 text-slate-300 border border-ink-700 transition-colors disabled:opacity-50"
+                  >
+                    {aligning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                    {aligning ? 'Re-timing…' : 'Re-time captions'}
+                  </button>
+                  <button
+                    onClick={handleFind}
+                    disabled={finding || !project}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-50"
+                  >
+                    {finding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    {finding ? 'Reading the transcript…' : 'Find clips'}
+                  </button>
+                </div>
               ) : (
                 <button
                   onClick={handleAlign}
@@ -315,11 +346,14 @@ export default function Clips({ onRefresh }: ClipsProps) {
               </div>
             )}
 
-            {/* Only while the timings are actually missing. A failed alignment that was
-                later resolved — or never needed, because the narration recorded its own
-                timings — leaves the error behind on the row, and showing it next to
-                "3162 words timed" reads as a broken video that is fine. */}
-            {alignError && wordCount === 0 && (
+            {/* Only while the timings are actually missing, or when a re-time was asked for
+                in this session and failed. A failed alignment that was later resolved — or
+                never needed, because the narration recorded its own timings — leaves the
+                error behind on the row, and showing it next to "3162 words timed" reads as a
+                broken video that is fine. A re-time that just failed is the opposite: the
+                timings on the row are the ones being replaced, so the error is the only
+                sign the replacement did not happen. */}
+            {alignError && (wordCount === 0 || alignAsked !== null) && (
               <div className="flex items-start gap-2 p-3 rounded-lg bg-error-500/10 border border-error-500/30">
                 <AlertCircle className="w-4 h-4 text-error-400 shrink-0 mt-0.5" />
                 <div className="min-w-0">
