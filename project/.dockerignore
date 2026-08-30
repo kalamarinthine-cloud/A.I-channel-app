@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.github
+*.log
+
+# The worker has its own build context and its .env holds the service role key —
+# it must never end up in the web image's build context.
+worker
+supabase

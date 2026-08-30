@@ -1,0 +1,45 @@
+# Runs Film Central as two always-on containers.
+#
+#   docker compose up -d --build
+#
+# After that there is no start-up routine: `restart: unless-stopped` brings both back
+# whenever Docker Desktop starts, so switching the machine on is enough. Open
+# http://localhost:8080 and the app is there.
+
+services:
+  # The app itself — built to static files and served by nginx.
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: film-central-web
+    container_name: fc-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  # Renders queued videos with FFmpeg. Independent of the app: it only talks to Supabase,
+  # so the app works with this stopped — renders simply wait in the queue until it's back.
+  worker:
+    build: ./worker
+    image: film-central-worker
+    container_name: fc-worker
+    env_file:
+      - worker/.env
+    environment:
+      # Path *inside* the container. The volume below maps it to ./masters on your disk.
+      MASTERS_DIR: /masters
+      # Retention. Masters grow at roughly 23 MB per minute of finished video and nothing
+      # else deletes them, so the folder is capped by total size — predictable regardless
+      # of how much you produce. Oldest go first; the newest render is never deleted.
+      # Set to 0 to keep everything forever.
+      MASTERS_MAX_GB: "20"
+      # Optional age rule, off by default. Set to e.g. "90" to also drop anything older
+      # than 90 days, whichever rule catches a file first.
+      MASTERS_KEEP_DAYS: "0"
+    volumes:
+      # Full-quality renders land here. Storage only keeps a 480p preview for anything
+      # past a couple of minutes, so without this the master would exist only on YouTube.
+      # Point the left-hand side somewhere else (an external drive, say) to archive there.
+      - ./masters:/masters
+    restart: unless-stopped
