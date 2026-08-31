@@ -229,6 +229,44 @@ export function downloadUrl(url: string, baseName: string): string {
   return `${url}${separator}download=${encodeURIComponent(filename)}`;
 }
 
+/**
+ * Where a clip's files sit in the `clips` bucket.
+ *
+ * The worker writes both under the video's folder, named for the clip, so the paths can be
+ * derived from the row rather than parsed back out of the public URLs — which are empty
+ * until a clip has rendered.
+ */
+export function clipStoragePaths(clip: Pick<Clip, 'id' | 'video_id'>): string[] {
+  return [`${clip.video_id}/${clip.id}.mp4`, `${clip.video_id}/${clip.id}.jpg`];
+}
+
+/**
+ * Deletes a clip and the files behind it.
+ *
+ * Storage has no foreign keys, so removing the row alone leaves the video and its poster in
+ * the bucket with nothing left pointing at them: unreachable from the app, but still stored
+ * and still counted. They have to go first, while the row still says where they are.
+ *
+ * `remove` takes the whole list in one request. That matters — deleting these one path at a
+ * time is rejected, and the bulk form is the only one that works. A clip that never
+ * rendered has no files, and removing paths that do not exist is not an error.
+ *
+ * A storage failure must not block the row. Leaving an undeletable clip in the list would
+ * be worse than leaving a file in a bucket, so the row goes either way and the caller is
+ * told what was left behind.
+ */
+export async function deleteClip(clip: Pick<Clip, 'id' | 'video_id'>): Promise<{ error?: string }> {
+  const { error: storageError } = await supabase.storage.from('clips').remove(clipStoragePaths(clip));
+
+  const { error } = await supabase.from('clips').delete().eq('id', clip.id);
+  if (error) return { error: `Could not delete this clip: ${error.message}` };
+
+  if (storageError) {
+    return { error: `Clip deleted, but its files are still in storage: ${storageError.message}` };
+  }
+  return {};
+}
+
 export type RenderJobStatus = 'queued' | 'rendering' | 'done' | 'error';
 
 export interface RenderJob {
