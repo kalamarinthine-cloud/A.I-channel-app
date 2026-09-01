@@ -1,4 +1,5 @@
 import {
+  deleteClip,
   downloadUrl,
   findClips,
   supabase,
@@ -238,7 +239,9 @@ export default function Clips({ onRefresh }: ClipsProps) {
 
   const handleDelete = async (clip: Clip) => {
     setBusyClipId(clip.id);
-    await supabase.from('clips').delete().eq('id', clip.id);
+    setError('');
+    const { error: deleteError } = await deleteClip(clip);
+    if (deleteError) setError(deleteError);
     await load();
     setBusyClipId(null);
   };
